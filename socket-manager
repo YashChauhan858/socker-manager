@@ -1,0 +1,253 @@
+
+import { io } from "socket.io-client";
+import Swal from "sweetalert2";
+import { getBackendUrl } from "./helper";
+
+/**
+ * @classdesc
+ * SocketManager is a class responsible for managing socket connections and events.
+ * It ensures a single instance of the socket is created and handles reconnect logic
+ * in case of disconnection or errors.
+ *
+ * @class
+ * @static
+ */
+export class SocketManager {
+  /**
+   * The singleton instance of the SocketManager class.
+   *
+   * @type {SocketManager|null}
+   * @memberof SocketManager
+   * @static
+   */
+  static instance = null;
+  /**
+   * Event tracker to keep track of all the events and their callbacks using a callback id
+   *   eventTracker = {
+   *        ...rest,
+   *        <event_name> : {
+   *              <callback_id> : <callback_function>
+   *        }
+   *   }
+   */
+  static eventTracker = {};
+
+  /**
+   * Initializes the SocketManager, creating a socket instance and setting up event handlers.
+   * If an instance already exists, it returns the existing instance.
+   *
+   * @static
+   * @returns {SocketManager} The SocketManager instance.
+   */
+  static init() {
+    if (SocketManager.instance === null) {
+      this.socket = io(getBackendUrl(), {
+        path: "/socket.io",
+        transports: ["websocket"],
+        upgrade: false,
+        auth: {
+          token: localStorage.getItem("_qrc_o1")?.replace("1290381092438", ""),
+        },
+      });
+
+      this.socket.on("connect", () => {
+        console.log("connected");
+      });
+
+      this.socket.on("disconnect", () => {
+        Swal.fire({
+          title: "Refresh",
+          text: "Please refresh the page to get the latest data.",
+          confirmButtonColor: "#3085d6",
+          confirmButtonText: "refresh",
+        }).then(async (result) => {
+          if (result.isConfirmed) {
+            window.location.reload();
+          }
+        });
+        // console.log("disconnect");
+        // // Reconnect and re-establish all the events
+        // console.log("reconnecting in 5s....");
+        // setTimeout(() => {
+        //   this.socket.connect();
+        //   SocketManager.reconnectAllEvents();
+        // }, 5000);
+      });
+
+      this.socket.on("connect_error", (err) => {
+        let parsedErr = JSON.parse(err.message);
+        if (!!parsedErr && "needAuth" in parsedErr) {
+          return Swal.fire({
+            title: "Error",
+            text: "Session has expired please login again",
+            icon: "error",
+            confirmButtonColor: "#3085d6",
+            confirmButtonText: "Login",
+          }).then(async (result) => {
+            if (result.isConfirmed) {
+              window.location.href = "/login";
+              SocketManager.unsubscribeAll();
+              this.socket.disconnect();
+            }
+          });
+        }
+        // Reconnect and re-establish all the events
+        console.log("reconnecting in 5s....");
+        setTimeout(() => {
+          this.socket.connect();
+          SocketManager.reconnectAllEvents();
+        }, 5000);
+      });
+
+      SocketManager.instance = this;
+    }
+    return SocketManager.instance;
+  }
+
+  /**
+   * Checks if the event tracker has any events registered.
+   *
+   * @static
+   * @returns {boolean} True if the event tracker is empty, false otherwise.
+   * @memberof SocketManager
+   */
+  static isEventTrackerEmpty() {
+    return Object.keys(SocketManager.eventTracker).length === 0;
+  }
+
+  /**
+   * Re-establishes all the socket events connections with their respective callbacks.
+   *
+   * @static
+   * @private
+   * @memberof SocketManager
+   */
+  static reconnectAllEvents() {
+    // Check if the eventTracker is empty
+    if (SocketManager.isEventTrackerEmpty()) return;
+    // Re-establish all the events
+    for (const event in SocketManager.eventTracker) {
+      for (const callbackId in SocketManager.eventTracker[event]) {
+        SocketManager.instance.socket.on(
+          `${event}`,
+          SocketManager.eventTracker[event][callbackId]
+        );
+      }
+    }
+  }
+
+  /**
+   * Checks if a specific event has any callbacks registered.
+   *
+   * @static
+   * @param {string} event - The name of the event.
+   * @returns {boolean} True if the event has no callbacks, false otherwise.
+   * @memberof SocketManager
+   */
+  static isEventEmpty(event) {
+    return Object.keys(SocketManager.eventTracker[event]).length === 0;
+  }
+
+  /**
+   * Registers a callback for a particular event.
+   *
+   * @static
+   * @param {string} event - The name of the event.
+   * @param {string} callbackId - The unique identifier for the callback.
+   * @param {Function} callback - The callback function to be registered.
+   * @memberof SocketManager
+   * @throws {Error} Throws an error if the callback is not provided.
+   */
+  static registerCallback(event, callbackId, callback) {
+    // Check for the socket instance and initialize if not already initialized
+    if (!SocketManager.instance) SocketManager.init();
+    // Check if callback is undefined or null
+    if (callback === undefined || callback === null)
+      throw new Error("Please provide a callback function");
+    // Register callback with the corresponding event
+    if (`${event}` in SocketManager.eventTracker) {
+      SocketManager.eventTracker[event] = {
+        ...SocketManager.eventTracker[event],
+        [callbackId]: callback,
+      };
+    } else {
+      SocketManager.eventTracker = {
+        ...SocketManager.eventTracker,
+        [event]: {
+          [callbackId]: callback,
+        },
+      };
+    }
+    // turn on the sockets corresponding to that event
+    SocketManager.instance.socket.on(`${event}`, callback);
+  }
+
+  /**
+   * Unregisters a callback with a specific callbackId for a particular event.
+   *
+   * @static
+   * @param {string} event - The name of the event.
+   * @param {string} callbackId - The unique identifier for the callback.
+   * @memberof SocketManager
+   * @throws {Error} Throws an error if the event or callback is not registered.
+   */
+  static unregisterCallback(event, callbackId) {
+    // Check if event is not present
+    if (!SocketManager.eventTracker[event]) {
+      throw new Error(`Event ( ${event} ) not registered`);
+    }
+    // Check if callback is not present
+    if (!SocketManager.eventTracker[event][callbackId]) {
+      throw new Error(
+        `Callback ( callbackId: ${callbackId} ) not registered under the event ( ${event} )`
+      );
+    }
+    // Unregister the callback
+    let callback = SocketManager.eventTracker[event][callbackId];
+    SocketManager.instance.socket.off(`${event}`, callback);
+    // remove the callback from the tracker
+    delete SocketManager.eventTracker[event][callbackId];
+    // If event object is empty remove the event from the tracker
+    if (SocketManager.isEventEmpty(event)) {
+      delete SocketManager.eventTracker[event];
+      // Remove all the listeners from the socket event
+      SocketManager.instance.socket.off(`${event}`);
+    }
+  }
+
+  /**
+   * Unregisters all events and their associated callbacks.
+   *
+   * @static
+   * @memberof SocketManager
+   */
+  static unsubscribeAll() {
+    SocketManager.instance.socket.removeAllListeners();
+    SocketManager.eventTracker = {};
+  }
+
+  /**
+   * Emits a socket event with the provided data.
+   *
+   * @static
+   * @param {string} event - The name of the event to emit.
+   * @param {*} [data] - The data to send along with the event (optional).
+   * @memberof SocketManager
+   * @throws {Error} Throws an error if the event name is not provided.
+   * @throws {Warning} Logs a warning if data is not provided.
+   */
+  static emitEvent(event, data) {
+    // Check if the event name is provided
+    if (!event)
+      throw new Error("Event name is required for socket event emission.");
+    // Check for the socket instance and initialize if not already initialized
+    if (!SocketManager.instance) SocketManager.init();
+    // Log a warning if data is not provided
+    if (data === undefined) {
+      console.warn(`No data provided for the socket event: ${event}`);
+    }
+    // Emit the event
+    if (data) return SocketManager.instance.socket.emit(event, data);
+    SocketManager.instance.socket.emit(event);
+  }
+}
